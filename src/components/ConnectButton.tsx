@@ -1,11 +1,14 @@
-import { useAccount, useConnect, useDisconnect, useEnsName, useEnsAvatar } from 'wagmi'
+import { useAccount, useConnect, useDisconnect, useEnsName, useEnsAvatar, useSwitchChain, useReadContract } from 'wagmi'
 import { useState, useRef, useEffect } from 'react'
 import { PRIMARY_CHAIN, ENS_CHAIN_ID } from '../config/chains'
+import { USDC_SEPOLIA_ADDRESS, ERC20_ABI } from '../config/contracts'
+import { formatUnits } from 'viem'
 
 export function ConnectButton() {
-  const { address, isConnected, chain } = useAccount()
+  const { address, isConnected, chain, chainId } = useAccount()
   const { connect, connectors, isPending } = useConnect()
   const { disconnect } = useDisconnect()
+  const { switchChain } = useSwitchChain()
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -18,6 +21,22 @@ export function ConnectButton() {
     name: ensName ?? undefined,
     chainId: ENS_CHAIN_ID,
   })
+
+  // USDC Balance on Sepolia
+  const { data: usdcBalance } = useReadContract({
+    address: USDC_SEPOLIA_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    chainId: PRIMARY_CHAIN.id,
+  })
+
+  // Auto-switch to Sepolia when connected to wrong network
+  useEffect(() => {
+    if (isConnected && chain?.id !== PRIMARY_CHAIN.id && switchChain) {
+      switchChain({ chainId: PRIMARY_CHAIN.id })
+    }
+  }, [isConnected, chain?.id, switchChain])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -34,6 +53,12 @@ export function ConnectButton() {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`
   }
 
+  const formatUsdcBalance = () => {
+    if (!usdcBalance) return '0.00'
+    const formatted = formatUnits(usdcBalance as bigint, 6) // USDC has 6 decimals
+    return parseFloat(formatted).toFixed(2)
+  }
+
   const isWrongNetwork = isConnected && chain?.id !== PRIMARY_CHAIN.id
 
   if (!isConnected) {
@@ -41,7 +66,7 @@ export function ConnectButton() {
     
     return (
       <button
-        onClick={() => metaMaskConnector && connect({ connector: metaMaskConnector })}
+        onClick={() => metaMaskConnector && connect({ connector: metaMaskConnector, chainId: PRIMARY_CHAIN.id })}
         disabled={isPending}
         className="btn-yellow px-5 py-2.5 bg-yt-primary text-yt-bg font-semibold rounded-xl hover:bg-yt-primary-hover disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
       >
@@ -111,14 +136,28 @@ export function ConnectButton() {
           {/* Address */}
           <div className="p-4 border-b border-yt-border">
             <p className="text-xs text-yt-text-muted mb-1">Dirección</p>
-            <p className="text-sm font-mono text-yt-text truncate">{address}</p>
+            <p className="text-sm font-mono text-yt-text truncate">{address?.slice(0,12)}...{address?.slice(-3)}</p>
           </div>
-
+          {/* USDC Balance */}
+          <div className="p-4 border-b border-yt-border bg-yt-bg-elevated">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center">
+                  <span className="text-white text-xs font-bold">$</span>
+                </div>
+                <span className="text-sm text-yt-text-secondary">USDC Balance</span>
+              </div>
+              <span className="text-lg font-bold text-yt-primary">
+                {formatUsdcBalance()}
+              </span>
+            </div>
+            <p className="text-xs text-yt-text-muted mt-1">Sepolia Testnet</p>
+          </div>
           {/* Wrong network warning */}
           {isWrongNetwork && (
             <div className="p-4 bg-yt-error/10 border-b border-yt-border">
               <p className="text-sm text-yt-error">
-                Por favor cambia a Sepolia
+                Por favor cambia a Sepolia, network actual: {chainId}
               </p>
             </div>
           )}
