@@ -3,17 +3,19 @@ import { Layout } from './components/Layout'
 import { HomePage } from './pages/HomePage'
 import { StreamerPage } from './pages/StreamerPage'
 import LandingPage from './pages/LandingPage'
-import PlaygroundPage from './pages/PlaygroundPage'
+import { YellowProvider } from './hooks/useYellow'
+
 
 export default function App() {
   return (
-    <Routes>
-      <Route element={<Layout />}>
-        <Route path="/home" element={<HomePage />} />
-        <Route path="/streamer/:ensName" element={<StreamerPage />} />
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/test" element={<PlaygroundPage />} />
-      </Route>
-    </Routes>
+    <YellowProvider>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/home" element={<HomePage />} />
+          <Route path="/streamer/:ensName" element={<StreamerPage />} />
+          <Route path="/" element={<LandingPage />} />
+        </Route>
+      </Routes>
+    </YellowProvider>
   )
 }

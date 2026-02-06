@@ -1,7 +1,41 @@
 import { Link } from 'react-router-dom'
+import { useAccount } from 'wagmi'
 import { ConnectButton } from './ConnectButton'
+import { useYellow } from '../hooks/useYellow'
+import { useState } from 'react'
+
+// Streamer address from env (same as HomePage)
+const STREAMER_ADDRESS =
+  (import.meta.env.VITE_STREAMER_ADDRESS as `0x${string}`) ??
+  '0xb3173d618e51277372B473e02E8ab05e97A3626c'
 
 export function Header() {
+  const { isConnected } = useAccount()
+  const {
+    isStreamActive,
+    isConnectedToYellow,
+    isInitializing,
+    toggleStream,
+    usdcBalance,
+    isSettling,
+    isWaitingForSettlement,
+    error,
+  } = useYellow()
+  const [isToggling, setIsToggling] = useState(false)
+
+  const handleToggle = async () => {
+    if (isToggling) return
+    setIsToggling(true)
+    try {
+      const limit = parseFloat(localStorage.getItem('yellowtok_spend_limit') ?? '10')
+      await toggleStream(STREAMER_ADDRESS, limit)
+    } finally {
+      setIsToggling(false)
+    }
+  }
+
+  const isBusy = isToggling || isInitializing || isSettling || isWaitingForSettlement
+
   return (
     <header className="fixed top-0 left-0 right-0 z-50 header-blur border-b border-yt-border">
       <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -28,21 +62,126 @@ export function Header() {
           </span>
         </Link>
 
-        {/* Navigation */}
-        <nav className="hidden md:flex items-center gap-8">
-          <Link 
-            to="/" 
-            className="text-yt-text-secondary hover:text-yt-text transition-colors duration-200 font-medium"
-          >
-            Lives
-          </Link>
-          <Link 
-            to="/" 
-            className="text-yt-text-secondary hover:text-yt-text transition-colors duration-200 font-medium"
-          >
-            Explore
-          </Link>
-        </nav>
+        {/* Center: Navigation + Stream Toggle */}
+        <div className="flex items-center gap-6">
+          <nav className="hidden md:flex items-center gap-8">
+            <Link 
+              to="/home" 
+              className="text-yt-text-secondary hover:text-yt-text transition-colors duration-200 font-medium"
+            >
+              Lives
+            </Link>
+            <Link 
+              to="/" 
+              className="text-yt-text-secondary hover:text-yt-text transition-colors duration-200 font-medium"
+            >
+              Explore
+            </Link>
+          </nav>
+
+          {/* Stream Switcher — only visible when wallet is connected */}
+          {isConnected && (
+            <div className="flex items-center gap-3">
+              {/* USDC Balance Badge */}
+              <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-yt-surface/80 border border-yt-border text-xs font-mono">
+                <span className="text-blue-400">💲</span>
+                <span className="text-yt-text">{usdcBalance.toFixed(2)}</span>
+                <span className="text-yt-text-secondary">USDC</span>
+              </div>
+
+              {/* Go Live / End Stream — settlement (USDC transfer) happens on End Stream */}
+              <button
+              onClick={handleToggle}
+              disabled={isBusy}
+              className={`
+                relative flex items-center gap-2 px-4 py-2 rounded-full 
+                font-semibold text-sm transition-all duration-300
+                disabled:opacity-60 disabled:cursor-not-allowed
+                ${
+                  isStreamActive
+                    ? 'bg-red-500/15 text-red-400 border border-red-500/30 hover:bg-red-500/25'
+                    : 'bg-yt-primary/15 text-yt-primary border border-yt-primary/30 hover:bg-yt-primary/25'
+                }
+              `}
+            >
+              {/* Status dot */}
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${
+                  isStreamActive
+                    ? 'bg-red-500 animate-pulse'
+                    : isConnectedToYellow
+                      ? 'bg-green-400'
+                      : isSettling
+                        ? 'bg-yellow-400 animate-pulse'
+                        : 'bg-gray-500'
+                }`}
+              />
+
+              {isBusy ? (
+                <>
+                  <svg
+                    className="w-4 h-4 animate-spin"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                    />
+                  </svg>
+                  <span>{isSettling ? 'Settling tips…' : isWaitingForSettlement ? 'Confirming settlement…' : 'Connecting…'}</span>
+                </>
+              ) : isStreamActive ? (
+                <>
+                  <svg
+                    className="w-4 h-4"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span>End Stream</span>
+                </>
+              ) : (
+                <>
+                  <svg
+                    className="w-4 h-4"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span>Go Live</span>
+                </>
+              )}
+            </button>
+
+              {/* Error toast */}
+              {error && (
+                <span className="hidden lg:block text-xs text-red-400 max-w-[200px] truncate" title={error}>
+                  ⚠ {error}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Connect Wallet */}
         <ConnectButton />

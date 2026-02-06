@@ -32,7 +32,7 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
   return (
     <div className="relative w-full h-full bg-yt-bg-elevated rounded-2xl overflow-hidden group">
       {/* Tip System - Área interactiva con animaciones */}
-      <TipSystem className="absolute inset-0 z-10" />
+      <TipSystem streamerAddress={streamerAddress} className="absolute inset-0 z-10" />
 
       {/* Video Background (simulated) */}
       <div className="absolute inset-0 bg-gradient-to-br from-yt-surface via-yt-bg-elevated to-yt-surface">

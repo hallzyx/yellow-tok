@@ -181,8 +181,7 @@ export function TipModal({ isOpen, onClose, onSelectTip }: TipModalProps) {
                 <div className="text-2xl">ℹ️</div>
                 <div className="flex-1">
                   <p className="text-sm text-yt-text-secondary">
-                    <span className="font-semibold text-yt-primary">Demo Version:</span> Tips are simulated.
-                    In production, they will be processed with Yellow Network for instant, uninterrupted payments.
+                    <span className="font-semibold text-yt-primary">Powered by Yellow Network:</span> Tips are sent instantly via state channels — zero gas fees, no confirmations needed.
                   </p>
                 </div>
               </div>

@@ -1,23 +1,38 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useAccount } from 'wagmi'
 import { TipModal, TipOption } from './TipModal'
 import { TipAnimationLayer, TipAnimation } from './TipAnimationLayer'
 import { SpendLimitModal } from './SpendLimitModal'
 import { SpendMeter } from './SpendMeter'
+import { useYellow } from '../hooks/useYellow'
 
 interface TipSystemProps {
+  streamerAddress: `0x${string}`
   className?: string
 }
 
 const SPEND_LIMIT_KEY = 'yellowtok_spend_limit'
 const SPENT_AMOUNT_KEY = 'yellowtok_spent_amount'
 
-export function TipSystem({ className = '' }: TipSystemProps) {
+export function TipSystem({ streamerAddress, className = '' }: TipSystemProps) {
+  const { isConnected: isWalletConnected } = useAccount()
+  const {
+    isInitialized,
+    isInitializing,
+    isConnectedToYellow,
+    isStreamActive,
+    session,
+    initialize,
+    createSession,
+    sendTip,
+    endSession,
+  } = useYellow()
+
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isLimitModalOpen, setIsLimitModalOpen] = useState(false)
   const [currentTip, setCurrentTip] = useState<TipOption | null>(null)
   const [animations, setAnimations] = useState<TipAnimation[]>([])
-  const [totalTips, setTotalTips] = useState(0)
-  const [totalSpent, setTotalSpent] = useState(0)
+  const [localSpent, setLocalSpent] = useState(0)
   const [spendLimit, setSpendLimit] = useState<number | null>(null)
 
   // Check for existing limit on mount
@@ -28,7 +43,7 @@ export function TipSystem({ className = '' }: TipSystemProps) {
     if (savedLimit) {
       setSpendLimit(parseFloat(savedLimit))
       if (savedSpent) {
-        setTotalSpent(parseFloat(savedSpent))
+        setLocalSpent(parseFloat(savedSpent))
       }
     } else {
       // Show limit modal on first visit
@@ -39,19 +54,26 @@ export function TipSystem({ className = '' }: TipSystemProps) {
   // Save spent amount to localStorage
   useEffect(() => {
     if (spendLimit !== null) {
-      localStorage.setItem(SPENT_AMOUNT_KEY, totalSpent.toString())
+      localStorage.setItem(SPENT_AMOUNT_KEY, localSpent.toString())
     }
-  }, [totalSpent, spendLimit])
+  }, [localSpent, spendLimit])
 
-  const handleConfirmLimit = (limit: number) => {
+  // Session is now controlled by the stream toggle in the Header.
+  // No auto-initialize here — user clicks “Go Live” first.
+
+  const handleConfirmLimit = async (limit: number) => {
     setSpendLimit(limit)
     localStorage.setItem(SPEND_LIMIT_KEY, limit.toString())
     localStorage.setItem(SPENT_AMOUNT_KEY, '0')
-    setTotalSpent(0)
+    setLocalSpent(0)
     setIsLimitModalOpen(false)
   }
 
-  const handleEditLimit = () => {
+  const handleEditLimit = async () => {
+    // End current session before changing limit
+    if (session) {
+      await endSession()
+    }
     setIsLimitModalOpen(true)
   }
 
@@ -71,39 +93,39 @@ export function TipSystem({ className = '' }: TipSystemProps) {
     setIsModalOpen(false)
   }, [])
 
-  // Click en la pantalla para enviar el tip
+  // Click en la pantalla para enviar el tip via Yellow Network
   const handleScreenClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      // Solo activar si hay un tip seleccionado
       if (!currentTip) return
+      if (!isStreamActive) return // Must go live first
 
-      // Check if limit is reached
-      if (spendLimit !== null && totalSpent >= spendLimit) {
-        return
-      }
-
-      // Check if this tip would exceed limit
-      if (spendLimit !== null && totalSpent + currentTip.priceValue > spendLimit) {
-        return
-      }
+      // Check spending limits
+      if (spendLimit !== null && localSpent >= spendLimit) return
+      if (spendLimit !== null && localSpent + currentTip.priceValue > spendLimit) return
 
       const rect = e.currentTarget.getBoundingClientRect()
       const x = ((e.clientX - rect.left) / rect.width) * 100
       const y = ((rect.bottom - e.clientY) / rect.height) * 100
 
-      // Crear nueva animación
+      // Instant visual feedback — animation fires immediately
       const newAnimation: TipAnimation = {
         id: `${Date.now()}-${Math.random()}`,
         icon: currentTip.icon,
-        x: Math.max(10, Math.min(90, x)), // Límites para que no se salga
+        x: Math.max(10, Math.min(90, x)),
         y: Math.max(5, Math.min(95, y)),
       }
 
       setAnimations((prev) => [...prev, newAnimation])
-      setTotalTips((prev) => prev + 1)
-      setTotalSpent((prev) => prev + currentTip.priceValue)
+
+      // Update local tracking immediately (optimistic)
+      setLocalSpent((prev) => prev + currentTip.priceValue)
+
+      // Send tip through Yellow Network state channel (off-chain, $0 gas)
+      if (isStreamActive) {
+        sendTip(currentTip.priceValue, streamerAddress, currentTip.name)
+      }
     },
-    [currentTip, spendLimit, totalSpent]
+    [currentTip, spendLimit, localSpent, isStreamActive, sendTip, streamerAddress]
   )
 
   // Cuando termina una animación, la removemos
@@ -124,23 +146,35 @@ export function TipSystem({ className = '' }: TipSystemProps) {
           onAnimationComplete={handleAnimationComplete}
         />
 
-        {/* Indicador del tip actual seleccionado */}
+        {/* Indicador del tip actual seleccionado + Yellow status */}
         {currentTip && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
             <div className="flex items-center gap-2 px-4 py-2 bg-black/70 backdrop-blur-md rounded-full border border-yt-primary/30 shadow-lg">
               <span className="text-2xl">{currentTip.icon}</span>
               <div className="flex flex-col">
-                <span className="text-xs text-yt-text-secondary">Tap to send</span>
+                <span className="text-xs text-yt-text-secondary">
+                  {isStreamActive ? 'Tap to send' : 'Go Live to tip ↑'}
+                </span>
                 <span className="text-sm font-semibold text-yt-primary">{currentTip.name}</span>
               </div>
+              <div
+                className={`w-2 h-2 rounded-full ml-1 ${
+                  isStreamActive
+                    ? 'bg-green-400'
+                    : isInitializing
+                      ? 'bg-yellow-400 animate-pulse'
+                      : 'bg-gray-500'
+                }`}
+                title={isStreamActive ? 'Yellow Network ⚡' : 'Stream offline'}
+              />
             </div>
           </div>
         )}
 
-        {/* Spend Meter - replaces old counter */}
+        {/* Spend Meter */}
         {spendLimit !== null && (
           <SpendMeter 
-            spent={totalSpent} 
+            spent={localSpent} 
             limit={spendLimit} 
             onEditLimit={handleEditLimit}
             className="absolute top-16 left-4 z-20"

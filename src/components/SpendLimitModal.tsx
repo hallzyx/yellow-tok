@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useYellow } from '../hooks/useYellow'
 
 interface SpendLimitModalProps {
   isOpen: boolean
@@ -8,14 +9,17 @@ interface SpendLimitModalProps {
 const PRESET_LIMITS = [10, 25, 50, 100, 250]
 
 export function SpendLimitModal({ isOpen, onConfirm }: SpendLimitModalProps) {
-  const [selectedLimit, setSelectedLimit] = useState<number>(50)
+  const [selectedLimit, setSelectedLimit] = useState<number>(10)
   const [customLimit, setCustomLimit] = useState<string>('')
   const [useCustom, setUseCustom] = useState(false)
+  const { usdcBalance, isUsdcLoading } = useYellow()
 
   if (!isOpen) return null
 
+  const finalLimit = useCustom && customLimit ? parseFloat(customLimit) : selectedLimit
+  const insufficientBalance = usdcBalance < finalLimit
+
   const handleConfirm = () => {
-    const finalLimit = useCustom && customLimit ? parseFloat(customLimit) : selectedLimit
     if (finalLimit > 0) {
       onConfirm(finalLimit)
     }
@@ -119,25 +123,35 @@ export function SpendLimitModal({ isOpen, onConfirm }: SpendLimitModalProps) {
               </div>
             </div>
 
-            {/* Info note */}
-            <div className="p-4 bg-yt-primary/10 rounded-xl border border-yt-primary/20">
+            {/* USDC Wallet Balance */}
+            <div className={`p-4 rounded-xl border ${
+              insufficientBalance
+                ? 'bg-red-500/10 border-red-500/20'
+                : 'bg-yt-primary/10 border-yt-primary/20'
+            }`}>
               <div className="flex items-start gap-3">
-                <svg
-                  className="w-5 h-5 text-yt-primary flex-shrink-0 mt-0.5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-                <p className="text-sm text-yt-text">
-                  This limit will be saved for your session. You can adjust it anytime from settings.
-                </p>
+                <span className="text-xl mt-0.5">{insufficientBalance ? '⚠️' : '💰'}</span>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-yt-text">Your USDC Balance</span>
+                    <span className={`text-lg font-bold font-mono ${
+                      insufficientBalance ? 'text-red-400' : 'text-yt-primary'
+                    }`}>
+                      {isUsdcLoading ? '...' : `$${usdcBalance.toFixed(2)}`}
+                    </span>
+                  </div>
+                  {insufficientBalance && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Not enough USDC. You need ${finalLimit.toFixed(2)} but only have ${usdcBalance.toFixed(2)}.
+                      Get testnet USDC at <a href="https://faucet.circle.com/" target="_blank" rel="noopener" className="underline">faucet.circle.com</a>
+                    </p>
+                  )}
+                  {!insufficientBalance && (
+                    <p className="text-xs text-yt-text-secondary mt-1">
+                      On-chain balance (Sepolia). This will fund your tipping session.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -146,9 +160,13 @@ export function SpendLimitModal({ isOpen, onConfirm }: SpendLimitModalProps) {
           <div className="p-6 border-t border-yt-border">
             <button
               onClick={handleConfirm}
-              className="w-full py-3 bg-yt-primary text-yt-bg font-bold rounded-xl hover:bg-yt-primary-hover transition-all hover:scale-[1.02] active:scale-95"
+              disabled={insufficientBalance || finalLimit <= 0}
+              className="w-full py-3 bg-yt-primary text-yt-bg font-bold rounded-xl hover:bg-yt-primary-hover transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
-              Confirm & Start Tipping
+              {insufficientBalance
+                ? 'Insufficient USDC Balance'
+                : `Set Budget: $${finalLimit.toFixed(2)} USDC`
+              }
             </button>
           </div>
         </div>
