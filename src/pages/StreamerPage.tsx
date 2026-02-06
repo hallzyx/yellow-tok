@@ -140,12 +140,12 @@ export function StreamerPage() {
         <div className="flex items-center justify-center gap-8 mb-8">
           <div className="text-center">
             <p className="text-xl font-bold text-yt-text">24.5K</p>
-            <p className="text-sm text-yt-text-muted">Seguidores</p>
+            <p className="text-sm text-yt-text-muted">Followers</p>
           </div>
           <div className="w-px h-8 bg-yt-border" />
           <div className="text-center">
             <p className="text-xl font-bold text-yt-text">156</p>
-            <p className="text-sm text-yt-text-muted">Siguiendo</p>
+            <p className="text-sm text-yt-text-muted">Following</p>
           </div>
           <div className="w-px h-8 bg-yt-border" />
           <div className="text-center">
@@ -157,10 +157,10 @@ export function StreamerPage() {
         {/* Action buttons */}
         <div className="flex items-center gap-3 mb-8">
           <button className="flex-1 btn-yellow py-3 bg-yt-primary text-yt-bg font-bold rounded-xl hover:bg-yt-primary-hover transition-all">
-            Seguir
+            Follow
           </button>
           <button className="flex-1 py-3 bg-yt-surface text-yt-text font-bold rounded-xl border border-yt-border hover:border-yt-primary transition-colors">
-            Enviar Tip
+            Send Tip
           </button>
           <button className="w-12 h-12 flex items-center justify-center bg-yt-surface rounded-xl border border-yt-border hover:border-yt-primary transition-colors">
             <svg className="w-5 h-5 text-yt-text" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -176,7 +176,7 @@ export function StreamerPage() {
               <svg className="w-5 h-5 text-yt-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              Información ENS
+              ENS Information
             </h2>
           </div>
           
@@ -184,7 +184,7 @@ export function StreamerPage() {
             {/* Address */}
             {address && (
               <div className="p-4 flex items-center justify-between">
-                <span className="text-yt-text-secondary">Dirección</span>
+                <span className="text-yt-text-secondary">Address</span>
                 <span className="font-mono text-sm text-yt-text">{`${address.slice(0, 10)}...${address.slice(-8)}`}</span>
               </div>
             )}
@@ -250,7 +250,7 @@ export function StreamerPage() {
             {/* No ENS data message */}
             {!twitter && !url && !email && !isLoading && (
               <div className="p-8 text-center">
-                <p className="text-yt-text-muted">No hay registros ENS adicionales disponibles</p>
+                <p className="text-yt-text-muted">No additional ENS records available</p>
               </div>
             )}
           </div>
@@ -258,7 +258,7 @@ export function StreamerPage() {
 
         {/* Recent streams section */}
         <div className="mt-8">
-          <h2 className="text-lg font-semibold text-yt-text mb-4">Streams recientes</h2>
+          <h2 className="text-lg font-semibold text-yt-text mb-4">Recent streams</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {[1, 2, 3].map((i) => (
               <div key={i} className="aspect-[9/16] bg-yt-surface rounded-xl overflow-hidden relative group cursor-pointer">
@@ -270,7 +270,7 @@ export function StreamerPage() {
                 </div>
                 <div className="absolute bottom-2 left-2 right-2">
                   <p className="text-xs text-white font-medium bg-black/50 px-2 py-1 rounded">
-                    {i * 12}K vistas
+                    {i * 12}K views
                   </p>
                 </div>
               </div>

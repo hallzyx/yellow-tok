@@ -40,7 +40,7 @@ export function Header() {
             to="/" 
             className="text-yt-text-secondary hover:text-yt-text transition-colors duration-200 font-medium"
           >
-            Explorar
+            Explore
           </Link>
         </nav>
 

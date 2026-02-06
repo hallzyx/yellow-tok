@@ -135,7 +135,7 @@ export function ConnectButton() {
         <div className="absolute right-0 mt-2 w-64 bg-yt-surface border border-yt-border rounded-xl shadow-xl overflow-hidden">
           {/* Address */}
           <div className="p-4 border-b border-yt-border">
-            <p className="text-xs text-yt-text-muted mb-1">Dirección</p>
+            <p className="text-xs text-yt-text-muted mb-1">Address</p>
             <p className="text-sm font-mono text-yt-text truncate">{address?.slice(0,12)}...{address?.slice(-3)}</p>
           </div>
           {/* USDC Balance */}
@@ -173,7 +173,7 @@ export function ConnectButton() {
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
             </svg>
-            Desconectar
+            Log out
           </button>
         </div>
       )}

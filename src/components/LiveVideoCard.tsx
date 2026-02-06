@@ -2,6 +2,7 @@ import { useEnsName, useEnsAvatar, useEnsText } from 'wagmi'
 import { normalize } from 'viem/ens'
 import { Link } from 'react-router-dom'
 import { ENS_CHAIN_ID } from '../config/chains'
+import { TipSystem } from './TipSystem'
 
 interface LiveVideoCardProps {
   streamerAddress: `0x${string}`
@@ -30,6 +31,9 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
 
   return (
     <div className="relative w-full h-full bg-yt-bg-elevated rounded-2xl overflow-hidden group">
+      {/* Tip System - Área interactiva con animaciones */}
+      <TipSystem className="absolute inset-0 z-10" />
+
       {/* Video Background (simulated) */}
       <div className="absolute inset-0 bg-gradient-to-br from-yt-surface via-yt-bg-elevated to-yt-surface">
         {/* Animated gradient background simulating video */}
@@ -75,9 +79,9 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
       <div className="absolute inset-0 video-gradient" />
 
       {/* Content overlay */}
-      <div className="absolute inset-0 p-6 flex flex-col justify-between">
+      <div className="absolute inset-0 p-6 flex flex-col justify-between pointer-events-none">
         {/* Top section */}
-        <div className="flex items-start justify-between">
+        <div className="flex items-start justify-between z-20 pointer-events-auto">
           {/* Viewers count */}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-black/50 backdrop-blur-sm rounded-full">
             <svg className="w-4 h-4 text-yt-text" fill="currentColor" viewBox="0 0 20 20">
@@ -94,7 +98,7 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
         </div>
 
         {/* Bottom section */}
-        <div className="space-y-4">
+        <div className="space-y-4 z-20 pointer-events-auto">
           {/* Streamer info */}
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-yt-primary flex-shrink-0">
@@ -116,7 +120,7 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
                 )}
               </Link>
               <p className="text-sm text-yt-text-secondary truncate">
-                {description ?? 'Streaming en YellowTok'}
+                {description ?? 'Streaming on YellowTok'}
               </p>
             </div>
           </div>
@@ -127,7 +131,7 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
               to={linkPath}
               className="flex-1 btn-yellow py-3 bg-yt-primary text-yt-bg font-semibold rounded-xl text-center hover:bg-yt-primary-hover transition-all"
             >
-              Ver perfil
+              View profile
             </Link>
             <button className="w-12 h-12 flex items-center justify-center bg-white/10 backdrop-blur-sm rounded-xl hover:bg-white/20 transition-colors">
               <svg className="w-6 h-6 text-yt-text" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -144,7 +148,7 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
       </div>
 
       {/* Side action bar (TikTok style) */}
-      <div className="absolute right-4 bottom-32 flex flex-col items-center gap-6">
+      <div className="absolute right-4 bottom-48 flex flex-col items-center gap-6 z-40 pointer-events-auto">
         {/* Like button */}
         <button className="flex flex-col items-center gap-1 group/btn">
           <div className="w-12 h-12 flex items-center justify-center bg-white/10 backdrop-blur-sm rounded-full group-hover/btn:bg-yt-primary/20 transition-colors">
@@ -163,16 +167,6 @@ export function LiveVideoCard({ streamerAddress }: LiveVideoCardProps) {
             </svg>
           </div>
           <span className="text-xs text-yt-text font-medium">1.2K</span>
-        </button>
-
-        {/* Tip button (Yellow) */}
-        <button className="flex flex-col items-center gap-1 group/btn">
-          <div className="w-12 h-12 flex items-center justify-center bg-yt-primary rounded-full glow-yellow-sm group-hover/btn:scale-110 transition-transform">
-            <svg className="w-7 h-7 text-yt-bg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <span className="text-xs text-yt-primary font-bold">TIP</span>
         </button>
       </div>
     </div>
