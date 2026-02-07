@@ -1,15 +1,16 @@
-export const USDC_SEPOLIA_ADDRESS = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' as const
+/** USDC on Base mainnet */
+export const USDC_BASE_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as const
+
+/** Legacy alias (some components may still reference this) */
+export const USDC_SEPOLIA_ADDRESS = USDC_BASE_ADDRESS
 
 /**
  * Custody contract where USDC is deposited to fund state channels.
- * In sandbox/hackathon mode we use the USDC contract itself as a
- * "self-custody" target — the approve step proves intent and the
- * ClearNode tracks the allowance as the session budget.
- *
- * In production, Yellow Network provides a dedicated Adjudicator
- * contract that holds the funds in escrow.
+ * This will be read dynamically from ClearNode get_config per-chain,
+ * but we keep a static fallback for the approve step.
+ * Base custody from Yellow Network production.
  */
-export const YELLOW_CUSTODY_ADDRESS = '0xb3173d618e51277372B473e02E8ab05e97A3626c' as const
+export const YELLOW_CUSTODY_ADDRESS = '0x490fb189DdE3a01B00be9BA5F41e3447FbC838b6' as const
 
 /** USDC decimals */
 export const USDC_DECIMALS = 6 as const

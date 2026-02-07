@@ -9,11 +9,12 @@ import { useState, useCallback } from 'react'
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, usePublicClient, useWalletClient } from 'wagmi'
 import { parseUnits, formatUnits } from 'viem'
 import {
-  USDC_SEPOLIA_ADDRESS,
+  USDC_BASE_ADDRESS,
   YELLOW_CUSTODY_ADDRESS,
   ERC20_ABI,
   USDC_DECIMALS,
 } from '../config/contracts'
+import { USDC_CHAIN_ID } from '../config/chains'
 
 export function useUSDC() {
   const { address } = useAccount()
@@ -31,10 +32,11 @@ export function useUSDC() {
     isLoading: isBalanceLoading,
     refetch: refetchBalance,
   } = useReadContract({
-    address: USDC_SEPOLIA_ADDRESS,
+    address: USDC_BASE_ADDRESS,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
     args: address ? [address] : undefined,
+    chainId: USDC_CHAIN_ID,
     query: { enabled: !!address },
   })
 
@@ -44,10 +46,11 @@ export function useUSDC() {
     isLoading: isAllowanceLoading,
     refetch: refetchAllowance,
   } = useReadContract({
-    address: USDC_SEPOLIA_ADDRESS,
+    address: USDC_BASE_ADDRESS,
     abi: ERC20_ABI,
     functionName: 'allowance',
     args: address ? [address, YELLOW_CUSTODY_ADDRESS] : undefined,
+    chainId: USDC_CHAIN_ID,
     query: { enabled: !!address },
   })
 
@@ -92,7 +95,7 @@ export function useUSDC() {
     const units = parseUnits(amountInDollars.toString(), USDC_DECIMALS)
 
     writeContract({
-      address: USDC_SEPOLIA_ADDRESS,
+      address: USDC_BASE_ADDRESS,
       abi: ERC20_ABI,
       functionName: 'approve',
       args: [YELLOW_CUSTODY_ADDRESS, units],
@@ -123,14 +126,14 @@ export function useUSDC() {
 
       // Send the real transfer tx
       const hash = await walletClient.writeContract({
-        address: USDC_SEPOLIA_ADDRESS,
+        address: USDC_BASE_ADDRESS,
         abi: ERC20_ABI,
         functionName: 'transfer',
         args: [toAddress, units],
       })
 
       console.log(`📝 [ON-CHAIN] Settlement tx submitted: ${hash}`)
-      console.log(`🔍 [ON-CHAIN] View on Etherscan: https://sepolia.etherscan.io/tx/${hash}`)
+      console.log(`🔍 [ON-CHAIN] View on BaseScan: https://basescan.org/tx/${hash}`)
       setDepositTxHash(hash)
 
       // Wait for confirmation

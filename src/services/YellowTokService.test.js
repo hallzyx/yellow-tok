@@ -56,7 +56,7 @@ describe('YellowTokService', () => {
 
   beforeEach(() => {
     yellowTok = new YellowTokService({
-      clearnodeUrl: 'wss://clearnet-sandbox.yellow.com/ws'
+      clearnodeUrl: 'wss://clearnet.yellow.com/ws'
     });
   });
 

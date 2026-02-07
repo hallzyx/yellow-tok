@@ -15,7 +15,7 @@ export interface YellowTokConfig {
     standardCommission?: number;
     /** Commission rate for partner streamers (default: 3) */
     partnerCommission?: number;
-    /** Default asset to use (default: 'ytest.usd') */
+    /** Default asset to use (default: 'usdc') */
     defaultAsset?: string;
     /** Asset decimal places (default: 6) */
     assetDecimals?: number;
@@ -83,7 +83,7 @@ export interface YellowTokConfig {
   export interface Allocation {
     /** Participant address */
     participant: string;
-    /** Asset identifier (e.g., 'ytest.usd') */
+    /** Asset identifier (e.g., 'usdc') */
     asset: string;
     /** Amount in asset units (considering decimals) */
     amount: string;
@@ -259,6 +259,8 @@ export interface YellowTokConfig {
       | 'tip_error' 
       | 'session_close_error' 
       | 'clearnode_error'
+      | 'deposit_error'
+      | 'withdraw_error'
       | 'max_reconnect_attempts';
     /** Error message */
     message: string;
@@ -274,6 +276,10 @@ export interface YellowTokConfig {
   
   export type ConnectedHandler = () => void;
   export type DisconnectedHandler = () => void;
+  export type AuthenticatedHandler = () => void;
+  export type ConfigReadyHandler = (data: { networks: any[]; brokerAddress: string }) => void;
+  export type DepositProgressHandler = (data: { step: number; total: number; message: string; complete?: boolean }) => void;
+  export type WithdrawProgressHandler = (data: { step: number; total: number; message: string; complete?: boolean }) => void;
   export type SessionCreatedHandler = (data: SessionCreatedEvent) => void;
   export type TipSentHandler = (data: TipSentEvent) => void;
   export type TipReceivedHandler = (data: TipReceivedEvent) => void;
@@ -284,11 +290,15 @@ export interface YellowTokConfig {
   export interface EventHandlers {
     onConnected: ConnectedHandler | null;
     onDisconnected: DisconnectedHandler | null;
+    onAuthenticated: AuthenticatedHandler | null;
+    onConfigReady: ConfigReadyHandler | null;
+    onDepositProgress: DepositProgressHandler | null;
     onSessionCreated: SessionCreatedHandler | null;
     onTipSent: TipSentHandler | null;
     onTipReceived: TipReceivedHandler | null;
     onBalanceUpdate: BalanceUpdateHandler | null;
     onSessionClosed: SessionClosedHandler | null;
+    onWithdrawProgress: WithdrawProgressHandler | null;
     onError: ErrorHandler | null;
   }
   
@@ -296,6 +306,10 @@ export interface YellowTokConfig {
   export type EventHandler = 
     | ConnectedHandler 
     | DisconnectedHandler 
+    | AuthenticatedHandler
+    | ConfigReadyHandler
+    | DepositProgressHandler
+    | WithdrawProgressHandler
     | SessionCreatedHandler 
     | TipSentHandler 
     | TipReceivedHandler 
@@ -414,11 +428,39 @@ export interface YellowTokConfig {
 
     /** Whether authenticated with ClearNode via Nitrolite */
     authenticated: boolean;
+
+    /** Whether USDC has been deposited and channel is open */
+    isDeposited: boolean;
+
+    /** Active channel ID (hex string) */
+    channelId: string | null;
+
+    /** Asset list from ClearNode */
+    assets: Array<{ token: string; chainId: number; symbol: string; decimals: number }>;
     
     // Connection methods
-    initialize(walletProvider: WalletProvider, walletClient: any): Promise<InitializeResult>;
+    initialize(userAddress: string, walletClient: any, publicClient?: any): Promise<InitializeResult>;
     disconnect(): void;
     
+    // Channel lifecycle methods
+    getSupportedChainIds(): number[];
+    isChainSupported(chainId: number): boolean;
+    getUSDCTokenForChain(chainId: number): string | null;
+    deepCleanup(chainId?: number, tokenAddress?: string): Promise<{
+      channelsClosed: Array<{ channelId: string; txHash: string }>;
+      custodyDrained: { amount: string; txHash: string | null } | null;
+      ledgerBalance: string | null;
+      errors: string[];
+    }>;
+    depositAndOpenChannel(amount: number, chainId: number, tokenAddress: string): Promise<{
+      channelId: string;
+      depositHash: string;
+      createTxHash: string;
+      resizeTxHash: string;
+      allocateTxHash: string;
+    }>;
+    closeChannelAndWithdraw(): Promise<{ closeTxHash: string; withdrawHash: string | null } | null>;
+
     // Session methods
     createStreamSession(
       streamerAddress: string,
@@ -447,6 +489,10 @@ export interface YellowTokConfig {
     // Event subscription
     on(event: 'onConnected', handler: ConnectedHandler): void;
     on(event: 'onDisconnected', handler: DisconnectedHandler): void;
+    on(event: 'onAuthenticated', handler: AuthenticatedHandler): void;
+    on(event: 'onConfigReady', handler: ConfigReadyHandler): void;
+    on(event: 'onDepositProgress', handler: DepositProgressHandler): void;
+    on(event: 'onWithdrawProgress', handler: WithdrawProgressHandler): void;
     on(event: 'onSessionCreated', handler: SessionCreatedHandler): void;
     on(event: 'onTipSent', handler: TipSentHandler): void;
     on(event: 'onTipReceived', handler: TipReceivedHandler): void;

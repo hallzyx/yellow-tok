@@ -6,10 +6,10 @@ interface SpendLimitModalProps {
   onConfirm: (limit: number) => void
 }
 
-const PRESET_LIMITS = [10, 25, 50, 100, 250]
+const PRESET_LIMITS = [0.1, 0.5, 1, 5, 10]
 
 export function SpendLimitModal({ isOpen, onConfirm }: SpendLimitModalProps) {
-  const [selectedLimit, setSelectedLimit] = useState<number>(10)
+  const [selectedLimit, setSelectedLimit] = useState<number>(0.5)
   const [customLimit, setCustomLimit] = useState<string>('')
   const [useCustom, setUseCustom] = useState(false)
   const { usdcBalance, isUsdcLoading } = useYellow()

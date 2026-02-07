@@ -16,10 +16,13 @@ export function Header() {
     isConnectedToYellow,
     isInitializing,
     toggleStream,
+    cleanupYellow,
+    isCleaning,
     usdcBalance,
     isSettling,
     isWaitingForSettlement,
     error,
+    depositStep,
   } = useYellow()
   const [isToggling, setIsToggling] = useState(false)
 
@@ -27,7 +30,7 @@ export function Header() {
     if (isToggling) return
     setIsToggling(true)
     try {
-      const limit = parseFloat(localStorage.getItem('yellowtok_spend_limit') ?? '10')
+      const limit = parseFloat(localStorage.getItem('yellowtok_spend_limit') ?? '0.5')
       await toggleStream(STREAMER_ADDRESS, limit)
     } finally {
       setIsToggling(false)
@@ -172,6 +175,36 @@ export function Header() {
                 </>
               )}
             </button>
+
+              {/* Cleanup button */}
+              <button
+                onClick={() => cleanupYellow()}
+                disabled={isCleaning}
+                title="Deep cleanup: close orphan channels, drain custody, reset state"
+                className={`
+                  flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-semibold
+                  transition-all duration-300
+                  ${isCleaning
+                    ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30 cursor-not-allowed'
+                    : 'bg-yt-surface/80 text-yt-text-secondary border border-yt-border hover:border-orange-500/50 hover:text-orange-400'
+                  }
+                `}
+              >
+                {isCleaning ? (
+                  <>
+                    <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <span>{depositStep || 'Cleaning...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <span>🧹</span>
+                    <span>Cleanup</span>
+                  </>
+                )}
+              </button>
 
               {/* Error toast */}
               {error && (

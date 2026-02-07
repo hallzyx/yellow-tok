@@ -14,7 +14,7 @@ import React, {
   useCallback,
   useEffect,
 } from 'react'
-import { useAccount, useWalletClient } from 'wagmi'
+import { useAccount, useWalletClient, usePublicClient, useSwitchChain } from 'wagmi'
 import YellowTokService from '../services/YellowTokService'
 import type {
   SessionInfo,
@@ -24,15 +24,8 @@ import type {
   SpendingLimitCheck,
 } from '../services/YellowTokService'
 import { useUSDC } from './useUSDC'
-
-// ─── Window type extension for ethereum provider ──────────────────
-declare global {
-  interface Window {
-    ethereum?: {
-      request(args: { method: string; params?: unknown[] }): Promise<unknown>
-    }
-  }
-}
+import { USDC_CHAIN_ID } from '../config/chains'
+import { USDC_BASE_ADDRESS } from '../config/contracts'
 
 // ─── Context value shape ──────────────────────────────────────────
 export interface UseYellowReturn {
@@ -44,6 +37,12 @@ export interface UseYellowReturn {
   isConnectedToYellow: boolean
   /** Whether the streaming session is actively running */
   isStreamActive: boolean
+  /** Whether USDC is being deposited to Yellow Network */
+  isDepositingToYellow: boolean
+  /** Whether funds are being withdrawn from Yellow Network */
+  isWithdrawingFromYellow: boolean
+  /** Current deposit/withdraw step description */
+  depositStep: string | null
   /** Current active streaming session info (null if none) */
   session: SessionInfo | null
   /** Last error message from Yellow Network operations */
@@ -94,6 +93,10 @@ export interface UseYellowReturn {
     tipAmount: number,
     spendingLimit: number
   ) => SpendingLimitCheck
+  /** Deep cleanup: close orphan channels, drain custody, reset state */
+  cleanupYellow: () => Promise<void>
+  /** Whether a cleanup operation is in progress */
+  isCleaning: boolean
   /** Clear the error state */
   clearError: () => void
 }
@@ -103,8 +106,10 @@ const YellowContext = createContext<UseYellowReturn | null>(null)
 
 // ─── Provider ─────────────────────────────────────────────────────
 export function YellowProvider({ children }: { children: React.ReactNode }) {
-  const { isConnected: isWalletConnected } = useAccount()
+  const { isConnected: isWalletConnected, address } = useAccount()
   const { data: walletClient } = useWalletClient()
+  const publicClient = usePublicClient()
+  const { switchChainAsync } = useSwitchChain()
 
   // ── On-chain USDC data ──────────────────────────────────────────
   const usdc = useUSDC()
@@ -114,8 +119,12 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
   const [isInitializing, setIsInitializing] = useState(false)
   const [isConnectedToYellow, setIsConnectedToYellow] = useState(false)
   const [isStreamActive, setIsStreamActive] = useState(false)
+  const [isDepositingToYellow, setIsDepositingToYellow] = useState(false)
+  const [isWithdrawingFromYellow, setIsWithdrawingFromYellow] = useState(false)
+  const [depositStep, setDepositStep] = useState<string | null>(null)
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [isCleaning, setIsCleaning] = useState(false)
 
   // Singleton service ref (survives re-renders)
   const serviceRef = useRef<YellowTokService | null>(null)
@@ -124,10 +133,10 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
   const getService = useCallback(() => {
     if (!serviceRef.current) {
       serviceRef.current = new YellowTokService({
-        clearnodeUrl: 'wss://clearnet-sandbox.yellow.com/ws',
+        clearnodeUrl: import.meta.env.VITE_NITROLITE_WS_URL || 'wss://clearnet.yellow.com/ws',
         standardCommission: 10,
         partnerCommission: 3,
-        defaultAsset: 'ytest.usd',
+        defaultAsset: 'usdc',
         assetDecimals: 6,
       })
     }
@@ -138,7 +147,7 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
   const initialize = useCallback(async (): Promise<boolean> => {
     if (isInitialized) return true
     if (isInitializing) return false
-    if (!isWalletConnected || !window.ethereum || !walletClient) {
+    if (!isWalletConnected || !address || !walletClient) {
       setError('Wallet not connected or wallet client not ready.')
       return false
     }
@@ -152,6 +161,16 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
       // Wire up event handlers → reactive state
       service.on('onConnected', () => setIsConnectedToYellow(true))
       service.on('onDisconnected', () => setIsConnectedToYellow(false))
+      service.on('onAuthenticated', () => console.log('🔐 Yellow Network authenticated'))
+      service.on('onConfigReady', () => console.log('⚙️ ClearNode config ready'))
+      service.on('onDepositProgress', (evt: { step: number; message: string; complete?: boolean }) => {
+        setDepositStep(evt.message)
+        if (evt.complete) setIsDepositingToYellow(false)
+      })
+      service.on('onWithdrawProgress', (evt: { step: number; message: string; complete?: boolean }) => {
+        setDepositStep(evt.message)
+        if (evt.complete) setIsWithdrawingFromYellow(false)
+      })
       service.on('onSessionCreated', () => setSession(service.getSessionInfo()))
       service.on('onTipSent', () => setSession(service.getSessionInfo()))
       service.on('onTipReceived', () => setSession(service.getSessionInfo()))
@@ -159,8 +178,8 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
       service.on('onSessionClosed', () => setSession(null))
       service.on('onError', (evt: { message: string }) => setError(evt.message))
 
-      // Pass walletClient for EIP-712 signing during Nitrolite auth
-      const result = await service.initialize(window.ethereum, walletClient)
+      // Pass address + walletClient + publicClient (no window.ethereum needed)
+      const result = await service.initialize(address, walletClient, publicClient)
 
       if (result.success) {
         setIsInitialized(true)
@@ -175,7 +194,7 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsInitializing(false)
     }
-  }, [isInitialized, isInitializing, isWalletConnected, walletClient, getService])
+  }, [isInitialized, isInitializing, isWalletConnected, address, walletClient, getService])
 
   // ── Create a streaming session (state channel) ──────────────────
   const createSession = useCallback(
@@ -257,53 +276,36 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
   const toggleStream = useCallback(
     async (streamerAddress: string, depositAmount: number) => {
       if (isStreamActive) {
-        // ══ Turn OFF → SETTLE on-chain: transfer ONLY the spent amount ══
-        const service = serviceRef.current
-        const sessionInfo = service?.getSessionInfo()
-        const spentAmount = sessionInfo?.spent ?? 0
-        const streamer = sessionInfo?.streamer as `0x${string}` | undefined
+        // ══ Turn OFF → Close Yellow channel + withdraw remaining funds ══
+        setIsWithdrawingFromYellow(true)
+        setDepositStep('Closing channel and withdrawing...')
 
-        // End the off-chain session first
-        await endSession()
-
-        // Now do the REAL on-chain settlement
-        if (spentAmount > 0 && streamer) {
-          console.log(`\n🏛️ ═══ SETTLEMENT ═════════════════════════════════════`)
-          console.log(`💸 Settling $${spentAmount.toFixed(2)} USDC to streamer ${streamer}`)
-          console.log(`💰 You keep $${(depositAmount - spentAmount).toFixed(2)} USDC (unused budget)`)
-
-          const txHash = await usdc.transferUSDC(spentAmount, streamer)
-
-          if (txHash) {
-            console.log(`✅ Settlement complete! $${spentAmount.toFixed(2)} USDC sent to streamer on-chain.`)
-            console.log(`💰 Your wallet now has: ~$${(usdc.balance - spentAmount).toFixed(2)} USDC`)
-          } else {
-            console.error('❌ Settlement transfer failed! Tips were off-chain only.')
-            setError('Settlement failed. The streamer did not receive the tips on-chain.')
-          }
-        } else {
-          console.log('💰 No tips were sent — nothing to settle on-chain. Your balance is unchanged.')
+        try {
+          // endStreamSession now handles close channel + withdraw internally
+          await endSession()
+          console.log('💰 Stream ended. Channel closed and funds withdrawn to wallet.')
+        } catch (err) {
+          console.error('❌ Settlement error:', err)
+          setError(err instanceof Error ? err.message : 'Settlement failed')
+        } finally {
+          setIsWithdrawingFromYellow(false)
+          setDepositStep(null)
         }
 
-        // Refetch on-chain balance after settlement
-        setTimeout(() => usdc.refetch(), 2000)
+        // Refetch on-chain balance after withdrawal
+        setTimeout(() => usdc.refetch(), 3000)
       } else {
-        // ══ Turn ON → Verify balance, connect, create session ══
-        // State channels DON'T move funds upfront — only at settlement!
+        // ══ Turn ON → Initialize, deposit to Yellow, create session ══
         usdc.refetch()
 
         if (usdc.balance < depositAmount) {
           setError(
-            `Insufficient USDC balance. You have $${usdc.balance.toFixed(2)} USDC but need $${depositAmount.toFixed(2)}.`
+            `Insufficient USDC balance on Base. You have $${usdc.balance.toFixed(2)} USDC but need $${depositAmount.toFixed(2)}. Please reduce your spending limit or add more USDC to Base network.`
           )
           return
         }
 
-        console.log(`💰 [USDC] Wallet balance: $${usdc.balance.toFixed(2)} USDC (on-chain, real)`)
-        console.log(`🔒 [SESSION] Locking $${depositAmount.toFixed(2)} USDC budget for this session`)
-        console.log(`⚡ No upfront transfer — funds move ONLY at settlement (End Stream)`)
-
-        // Turn ON → initialize if needed, then create session
+        // Initialize Yellow Network connection if not ready
         const service = serviceRef.current
         const alreadyConnected = service?.connected ?? false
 
@@ -312,16 +314,119 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
           ready = await initialize()
         }
 
-        if (ready) {
-          const result = await createSession(streamerAddress, depositAmount)
-          if (result?.success) {
-            setIsStreamActive(true)
+        if (!ready) return
+
+        const svc = getService()
+
+        // Double-check balance before proceeding
+        if (usdc.balance < depositAmount) {
+          setError(
+            `Cannot deposit $${depositAmount.toFixed(2)} USDC. Your balance: $${usdc.balance.toFixed(2)}. Please lower your spending limit.`
+          )
+          return
+        }
+
+        // Switch MetaMask to Base mainnet explicitly before any on-chain ops
+        try {
+          console.log('🔗 Switching wallet to Base mainnet...')
+          await switchChainAsync({ chainId: USDC_CHAIN_ID })
+        } catch (switchErr) {
+          console.error('❌ Failed to switch to Base:', switchErr)
+          setError('Please switch your wallet to Base network to continue.')
+          return
+        }
+
+        // Deposit to Yellow Network on Base mainnet
+        try {
+          const chainId = USDC_CHAIN_ID // Base (8453)
+          const tokenAddress = USDC_BASE_ADDRESS
+
+          if (svc.isChainSupported(chainId)) {
+            console.log(`💰 [YELLOW] Depositing ${depositAmount} USDC to Yellow Network on Base...`)
+            setIsDepositingToYellow(true)
+            setDepositStep('Starting deposit...')
+
+            await svc.depositAndOpenChannel(depositAmount, chainId, tokenAddress)
+            setIsDepositingToYellow(false)
+            setDepositStep(null)
+          } else {
+            const supported = svc.getSupportedChainIds()
+            console.warn(
+              `⚠️ Base chain (${chainId}) not in ClearNode config. Supported: ${supported.join(', ')}`
+            )
+            console.log('💡 Tips will be tracked locally until Base is confirmed by ClearNode.')
           }
+        } catch (depositErr) {
+          setIsDepositingToYellow(false)
+          setDepositStep(null)
+          console.error('❌ Deposit failed:', depositErr)
+          setError(
+            depositErr instanceof Error ? depositErr.message : 'Deposit to Yellow Network failed'
+          )
+          return
+        }
+
+        // Create the session (local tracking + ledger balance query)
+        const result = await createSession(streamerAddress, depositAmount)
+        if (result?.success) {
+          setIsStreamActive(true)
         }
       }
     },
-    [isStreamActive, initialize, createSession, endSession, usdc]
+    [isStreamActive, initialize, createSession, endSession, usdc, getService, switchChainAsync]
   )
+
+  // ── Deep cleanup ────────────────────────────────────────────────
+  const cleanupYellow = useCallback(async () => {
+    const service = serviceRef.current
+    if (!service || !service.connected) {
+      // Need to initialize first
+      const ok = await initialize()
+      if (!ok) {
+        setError('Could not connect to Yellow Network for cleanup')
+        return
+      }
+    }
+
+    setIsCleaning(true)
+    setError(null)
+    setDepositStep('🧹 Starting deep cleanup...')
+
+    try {
+      const svc = getService()
+
+      // Switch to Base
+      try {
+        await switchChainAsync({ chainId: USDC_CHAIN_ID })
+      } catch {
+        // may already be on Base
+      }
+
+      const result = await svc.deepCleanup(USDC_CHAIN_ID, USDC_BASE_ADDRESS)
+
+      const summary = [
+        `Channels closed: ${result.channelsClosed.length}`,
+        `Custody drained: ${result.custodyDrained?.amount ?? '0'} USDC`,
+        result.errors.length > 0 ? `Warnings: ${result.errors.join('; ')}` : null,
+      ].filter(Boolean).join(' | ')
+
+      console.log('🧹 Cleanup complete:', summary)
+      setDepositStep(null)
+
+      // Reset stream state
+      setIsStreamActive(false)
+      setSession(null)
+
+      // Refetch wallet balance
+      setTimeout(() => usdc.refetch(), 3000)
+    } catch (err) {
+      console.error('❌ Cleanup failed:', err)
+      setError(err instanceof Error ? err.message : 'Cleanup failed')
+      setDepositStep(null)
+    } finally {
+      setIsCleaning(false)
+    }
+  }, [initialize, getService, switchChainAsync, usdc])
 
   // ── Check spending limit ────────────────────────────────────────
   const checkSpendingLimit = useCallback(
@@ -358,6 +463,9 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
       setIsInitialized(false)
       setIsConnectedToYellow(false)
       setIsStreamActive(false)
+      setIsDepositingToYellow(false)
+      setIsWithdrawingFromYellow(false)
+      setDepositStep(null)
       setSession(null)
       setError(null)
     }
@@ -371,6 +479,9 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
         isInitializing,
         isConnectedToYellow,
         isStreamActive,
+        isDepositingToYellow,
+        isWithdrawingFromYellow,
+        depositStep,
         session,
         error,
 
@@ -381,8 +492,8 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
         isApproving: usdc.isApproving,
         isWaitingForApproval: usdc.isWaitingForApproval,
         isApproveConfirmed: usdc.isApproveConfirmed,
-        isSettling: usdc.isDepositing,
-        isWaitingForSettlement: usdc.isWaitingForDeposit,
+        isSettling: usdc.isDepositing || isWithdrawingFromYellow,
+        isWaitingForSettlement: usdc.isWaitingForDeposit || isWithdrawingFromYellow,
 
         initialize,
         approveUSDC: usdc.approveUSDC,
@@ -392,6 +503,8 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
         endSession,
         toggleStream,
         checkSpendingLimit,
+        cleanupYellow,
+        isCleaning,
         clearError,
       }}
     >
