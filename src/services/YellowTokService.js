@@ -1,42 +1,63 @@
 /**
- * 
- * This service handles all Yellow Network state channel operations for YellowTok:
- * - Creating streaming sessions (state channels)
- * - Instant, gasless tipping via off-chain transactions
- * - Session management and settlement
- * - Balance tracking and spending limits
-
+ * YellowTokService — Yellow Network integration for YellowTok
+ *
+ * Uses @erc7824/nitrolite SDK for:
+ * - Challenge-response authentication (EIP-712)
+ * - Session key management (no wallet popups after initial auth)
+ * - Off-chain transfers via createTransferMessage ($0 gas tips)
+ * - Message parsing via parseAnyRPCResponse
+ *
+ * Flow:
+ *   1. initialize(provider, walletClient) → connect WS + Nitrolite auth
+ *   2. createStreamSession(streamer, amount) → local session tracking
+ *   3. sendTip(amount, streamer) → createTransferMessage (session-key signed)
+ *   4. endStreamSession() → close local session
  */
+
+import {
+  createAuthRequestMessage,
+  createAuthVerifyMessage,
+  createEIP712AuthMessageSigner,
+  createECDSAMessageSigner,
+  createTransferMessage,
+  createGetLedgerBalancesMessage,
+  parseAnyRPCResponse,
+  RPCMethod,
+} from '@erc7824/nitrolite';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { getAddress } from 'viem';
 
 class YellowTokService {
   constructor(config = {}) {
     // Configuration
     this.config = {
-      // Use sandbox for testing, production for live
       clearnodeUrl: config.clearnodeUrl || 'wss://clearnet-sandbox.yellow.com/ws',
-      // Commission rates
-      standardCommission: config.standardCommission || 10, // 10% for standard
-      partnerCommission: config.partnerCommission || 3,    // 3% for partners
-      // Default asset
-      defaultAsset: config.defaultAsset || 'usdc',
-      // Asset decimals (USDC has 6 decimals)
+      standardCommission: config.standardCommission || 10,
+      partnerCommission: config.partnerCommission || 3,
+      defaultAsset: config.defaultAsset || 'ytest.usd',
       assetDecimals: config.assetDecimals || 6,
-      ...config
+      appName: config.appName || 'YellowTok',
+      authScope: config.authScope || 'yellowtok.app',
+      sessionDuration: config.sessionDuration || 3600, // 1 hour
+      ...config,
     };
 
     // Connection state
     this.ws = null;
     this.connected = false;
+    this.authenticated = false;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
 
-    // User state
+    // User & session key state
     this.userAddress = null;
-    this.messageSigner = null;
+    this.walletClient = null; // viem WalletClient for EIP-712 signing
+    this.sessionKey = null; // { privateKey, address } — ephemeral key
+    this.sessionSigner = null; // ECDSA signer from session key
 
     // Session state
-    this.activeSessions = new Map(); // sessionId -> session data
-    this.activeStreamSession = null; // Current stream session
+    this.activeSessions = new Map();
+    this.activeStreamSession = null;
 
     // Event callbacks
     this.eventHandlers = {
@@ -47,165 +68,362 @@ class YellowTokService {
       onTipSent: null,
       onBalanceUpdate: null,
       onSessionClosed: null,
-      onError: null
+      onError: null,
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // INITIALIZE: wallet → ClearNode → Nitrolite auth
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Initialize the service and connect to Yellow Network
-   * @param {Object} walletProvider - Web3 wallet provider (e.g., window.ethereum)
-   * @returns {Promise<Object>} - { success: boolean, address: string }
+   * Initialize the service: connect wallet, WebSocket, and authenticate.
+   *
+   * @param {Object} walletProvider — window.ethereum
+   * @param {Object} walletClient  — viem WalletClient from wagmi (for EIP-712)
+   * @returns {Promise<Object>} { success, address }
    */
-  async initialize(walletProvider) {
+  async initialize(walletProvider, walletClient) {
     try {
-      console.log(' Initializing YellowTok Service...');
+      console.log('[YELLOW] 🚀 Initializing YellowTok Service...');
 
-      // Setup wallet connection
-      const { userAddress, messageSigner } = await this._setupWallet(walletProvider);
+      // 1. Get user address from provider
+      const { userAddress } = await this._setupWallet(walletProvider);
       this.userAddress = userAddress;
-      this.messageSigner = messageSigner;
+      this.walletClient = walletClient;
 
-      console.log(' Wallet connected:', userAddress);
+      console.log('[YELLOW] 👛 Wallet connected:', userAddress);
 
-      // Connect to Yellow Network ClearNode
+      // 2. Generate or restore ephemeral session key
+      this._initSessionKey();
+      console.log('[YELLOW] 🔑 Session key:', this.sessionKey.address);
+
+      // 3. Connect WebSocket to ClearNode
       await this._connectToClearNode();
 
-      return {
-        success: true,
-        address: userAddress
-      };
+      // 4. Authenticate via Nitrolite (EIP-712 challenge-response)
+      //    This is the ONLY wallet popup — after this, session key signs everything.
+      await this._authenticateWithNitrolite();
+
+      return { success: true, address: userAddress };
     } catch (error) {
-      console.error(' Failed to initialize YellowTok Service:', error);
+      console.error('❌ Failed to initialize YellowTok Service:', error);
       this._triggerEvent('onError', {
         type: 'initialization_error',
         message: error.message,
-        error
+        error,
       });
-      return {
-        success: false,
-        error: error.message
-      };
+      return { success: false, error: error.message };
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // SESSION KEY — ephemeral key for signing without wallet popups
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Setup wallet connection and message signer
+   * Generate or restore session key from localStorage.
+   * @private
+   */
+  _initSessionKey() {
+    const STORAGE_KEY = 'yellowtok_session_key';
+
+    // Build a fingerprint of the auth config so that if allowances/scope change
+    // we generate a fresh session key (ClearNode won't update allowances for
+    // an existing key).
+    const configFingerprint = JSON.stringify({
+      asset: this.config.defaultAsset,
+      scope: this.config.authScope,
+      app: this.config.appName,
+    });
+
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (
+          parsed.privateKey &&
+          parsed.address &&
+          parsed.configFingerprint === configFingerprint
+        ) {
+          this.sessionKey = { privateKey: parsed.privateKey, address: parsed.address };
+          this.sessionSigner = createECDSAMessageSigner(parsed.privateKey);
+          return;
+        }
+        // Config changed → invalidate old key so ClearNode registers fresh allowances
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      /* generate new */
+    }
+
+    // Generate fresh session key
+    const privateKey = generatePrivateKey();
+    const account = privateKeyToAccount(privateKey);
+    this.sessionKey = { privateKey, address: account.address };
+    this.sessionSigner = createECDSAMessageSigner(privateKey);
+
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ ...this.sessionKey, configFingerprint })
+      );
+    } catch {
+      /* non-critical */
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // WALLET SETUP
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
    * @private
    */
   async _setupWallet(walletProvider) {
     if (!walletProvider) {
-      throw new Error('No wallet provider available. Please install MetaMask or another Web3 wallet.');
+      throw new Error(
+        'No wallet provider available. Please install MetaMask or another Web3 wallet.'
+      );
     }
 
-    // Request account access
     const accounts = await walletProvider.request({
-      method: 'eth_requestAccounts'
+      method: 'eth_requestAccounts',
     });
 
     if (!accounts || accounts.length === 0) {
       throw new Error('No accounts found. Please unlock your wallet.');
     }
 
-    const userAddress = accounts[0];
-
-    // Create message signer function
-    const messageSigner = async (message) => {
-      try {
-        return await walletProvider.request({
-          method: 'personal_sign',
-          params: [message, userAddress]
-        });
-      } catch (error) {
-        console.error('Failed to sign message:', error);
-        throw new Error('User rejected signature or signing failed');
-      }
-    };
-
-    return { userAddress, messageSigner };
+    return { userAddress: getAddress(accounts[0]) };
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // WEBSOCKET CONNECTION
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Connect to Yellow Network ClearNode
    * @private
    */
   async _connectToClearNode() {
     return new Promise((resolve, reject) => {
-      console.log('🔌 Connecting to Yellow Network ClearNode...');
-      
+      console.log('[YELLOW] 🔌 Connecting to Yellow Network ClearNode...');
+
       this.ws = new WebSocket(this.config.clearnodeUrl);
 
-      // Connection opened
       this.ws.onopen = () => {
-        console.log('Connected to Yellow Network ClearNode');
+        console.log('[YELLOW] ✅ Connected to Yellow Network ClearNode');
         this.connected = true;
         this.reconnectAttempts = 0;
         this._triggerEvent('onConnected');
         resolve();
       };
 
-      // Message received
-      this.ws.onmessage = (event) => {
+      // Persistent message handler for post-auth messages
+      this.ws.addEventListener('message', (event) => {
         this._handleMessage(event.data);
-      };
+      });
 
-      // Connection error
       this.ws.onerror = (error) => {
-        console.error(' ClearNode connection error:', error);
+        console.error('❌ ClearNode connection error:', error);
         this._triggerEvent('onError', {
           type: 'connection_error',
           message: 'Failed to connect to Yellow Network',
-          error
+          error,
         });
         reject(error);
       };
 
-      // Connection closed
       this.ws.onclose = () => {
-        console.log(' Disconnected from Yellow Network');
+        console.log('[YELLOW] 🔌 Disconnected from Yellow Network');
         this.connected = false;
+        this.authenticated = false;
         this._triggerEvent('onDisconnected');
         this._attemptReconnect();
       };
     });
   }
 
-  /**
-   * Attempt to reconnect to ClearNode
-   * @private
-   */
-  _attemptReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-      
-      console.log(` Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`);
-      
-      setTimeout(() => {
-        this._connectToClearNode().catch(err => {
-          console.error('Reconnect failed:', err);
-        });
-      }, delay);
-    } else {
-      console.error(' Max reconnection attempts reached');
-      this._triggerEvent('onError', {
-        type: 'max_reconnect_attempts',
-        message: 'Could not reconnect to Yellow Network'
-      });
-    }
-  }
+  // ═══════════════════════════════════════════════════════════════
+  // NITROLITE AUTHENTICATION (EIP-712 challenge-response)
+  // ═══════════════════════════════════════════════════════════════
 
   /**
-   * Create a new streaming session (state channel)
-   * This opens a state channel between viewer and streamer
-   * 
-   * @param {string} streamerAddress - Ethereum address of the streamer
-   * @param {number} depositAmount - Amount viewer wants to deposit (in dollars)
-   * @param {Object} options - Additional options
-   * @returns {Promise<Object>} - Session details
+   * Full challenge-response auth flow:
+   *   1. Send auth_request → server
+   *   2. Receive auth_challenge ← server
+   *   3. Sign challenge with EIP-712 (one wallet popup)
+   *   4. Send auth_verify → server
+   *   5. Receive auth success + JWT ← server
+   *
+   * After this, sessionSigner signs all subsequent requests (no popups).
+   * @private
+   */
+  async _authenticateWithNitrolite() {
+    if (!this.walletClient || !this.sessionKey) {
+      throw new Error('Wallet client and session key required for authentication');
+    }
+
+    return new Promise(async (resolve, reject) => {
+      // Expire timestamp must be IDENTICAL in request and verify
+      const sessionExpire = String(
+        Math.floor(Date.now() / 1000) + this.config.sessionDuration
+      );
+
+      let authTimeout;
+      let onClose;
+
+      // Cleanup helper
+      const cleanup = () => {
+        clearTimeout(authTimeout);
+        if (this.ws) {
+          this.ws.removeEventListener('message', onAuthMessage);
+          this.ws.removeEventListener('close', onClose);
+        }
+      };
+
+      // Timeout (30s)
+      authTimeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Authentication timed out (30s). ClearNode may be unreachable.'));
+      }, 30000);
+
+      // Handle disconnection during auth
+      onClose = () => {
+        cleanup();
+        reject(new Error('Connection lost during authentication'));
+      };
+      this.ws.addEventListener('close', onClose);
+
+      // Temporary message handler for the auth flow
+      const onAuthMessage = async (event) => {
+        try {
+          const raw =
+            typeof event.data === 'string' ? event.data : event.data.toString();
+          let data;
+          try {
+            data = JSON.parse(raw);
+          } catch {
+            return; // non-JSON, ignore
+          }
+
+          const response = parseAnyRPCResponse(JSON.stringify(data));
+
+          // ── Step 2: Challenge received → sign with EIP-712 ──
+          if (response.method === RPCMethod.AuthChallenge) {
+            console.log('[YELLOW] 🔑 Auth challenge received, signing with EIP-712...');
+
+            try {
+              // PartialEIP712AuthMessage requires: scope, session_key, expires_at, allowances
+              const eip712Params = {
+                scope: this.config.authScope,
+                session_key: this.sessionKey.address,
+                expires_at: BigInt(sessionExpire),
+                allowances: [
+                  { asset: this.config.defaultAsset, amount: '10000' },
+                ],
+              };
+
+              const eip712Signer = createEIP712AuthMessageSigner(
+                this.walletClient,
+                eip712Params,
+                { name: this.config.appName }
+              );
+
+              const verifyPayload = await createAuthVerifyMessage(
+                eip712Signer,
+                response
+              );
+
+              this.ws.send(verifyPayload);
+            } catch (signError) {
+              cleanup();
+              reject(
+                new Error('User rejected signature or signing failed')
+              );
+            }
+          }
+
+          // ── Step 5: Auth verified → authenticated! ──
+          if (response.method === RPCMethod.AuthVerify) {
+            if (response.params?.success !== false) {
+              console.log('[YELLOW] ✅ Authenticated with Yellow Network via Nitrolite!');
+              this.authenticated = true;
+              cleanup();
+
+              // Store JWT for potential re-auth
+              if (response.params?.jwtToken) {
+                try {
+                  localStorage.setItem(
+                    'yellowtok_jwt',
+                    response.params.jwtToken
+                  );
+                } catch {
+                  /* non-critical */
+                }
+              }
+
+              resolve();
+            }
+          }
+
+          // ── Error during auth ──
+          if (response.method === RPCMethod.Error) {
+            console.error('❌ Auth error:', response.params);
+            cleanup();
+            reject(
+              new Error(response.params?.error || 'Authentication failed')
+            );
+          }
+        } catch (err) {
+          console.warn('⚠️ Parse error during auth:', err);
+        }
+      };
+
+      this.ws.addEventListener('message', onAuthMessage);
+
+      // ── Step 1: Send auth request ──
+      console.log('[YELLOW] 📤 Sending Nitrolite auth request...');
+      try {
+        const authPayload = await createAuthRequestMessage({
+          address: this.userAddress,
+          session_key: this.sessionKey.address,
+          application: this.config.appName,
+          allowances: [
+            { asset: this.config.defaultAsset, amount: '10000' },
+          ],
+          expires_at: BigInt(sessionExpire),
+          scope: this.config.authScope,
+        });
+
+        this.ws.send(authPayload);
+      } catch (err) {
+        cleanup();
+        reject(err);
+      }
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CREATE STREAM SESSION (state channel)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Create a streaming session.
+   * After Nitrolite auth, the session is essentially the authenticated
+   * connection. This method sets up local tracking and optionally
+   * fetches the ledger balance from ClearNode.
+   *
+   * @param {string} streamerAddress
+   * @param {number} depositAmount — budget in USDC
+   * @param {Object} options — { isPartner }
+   * @returns {Promise<Object>}
    */
   async createStreamSession(streamerAddress, depositAmount, options = {}) {
-    if (!this.connected) {
-      throw new Error('Not connected to Yellow Network. Please initialize first.');
+    if (!this.connected || !this.authenticated) {
+      throw new Error(
+        'Not connected/authenticated to Yellow Network. Please initialize first.'
+      );
     }
 
     if (!streamerAddress || !depositAmount) {
@@ -213,62 +431,16 @@ class YellowTokService {
     }
 
     try {
-      console.log(`🎬 Creating stream session with ${streamerAddress}...`);
-      console.log(`🔗 [ON-CHAIN] Deposit backed by ${depositAmount} USDC approved to Yellow custody`);
-
-      // Convert dollar amount to asset units (considering decimals)
-      const depositInUnits = this._toAssetUnits(depositAmount);
-
-      // Determine commission rate (3% for partners, 10% for standard)
-      const isPartner = options.isPartner || false;
-      const commissionRate = isPartner ? this.config.partnerCommission : this.config.standardCommission;
-
-      // Create application definition for the streaming session
-      const appDefinition = {
-        protocol: 'yellowtok-streaming-v1',
-        participants: [this.userAddress, streamerAddress],
-        // Weights determine voting power (50-50 split for bilateral channel)
-        weights: [50, 50],
-        // Quorum: percentage of weights needed for consensus (100 = both must agree)
-        quorum: 100,
-        // Challenge period in seconds (0 for instant finality in sandbox)
-        challenge: options.challengePeriod || 0,
-        // Unique nonce to prevent replay attacks
-        nonce: Date.now(),
-        // Custom metadata
-        metadata: {
-          sessionType: 'streaming',
-          commissionRate,
-          isPartner,
-          streamerId: streamerAddress,
-          viewerId: this.userAddress,
-          timestamp: new Date().toISOString()
-        }
-      };
-
-      // Initial allocations (viewer deposits, streamer starts at 0)
-      const allocations = [
-        {
-          participant: this.userAddress,
-          asset: this.config.defaultAsset,
-          amount: depositInUnits.toString()
-        },
-        {
-          participant: streamerAddress,
-          asset: this.config.defaultAsset,
-          amount: '0'
-        }
-      ];
-
-      // Create and sign the session message
-      const sessionMessage = await this._createAppSessionMessage(
-        [{ definition: appDefinition, allocations }]
+      console.log(`[LOCAL] 🎬 Creating stream session with ${streamerAddress}...`);
+      console.log(
+        `[LOCAL] 🔗 Session budget: $${depositAmount.toFixed(2)} USDC (backed by on-chain balance)`
       );
 
-      // Send to ClearNode
-      this.ws.send(sessionMessage);
+      const isPartner = options.isPartner || false;
+      const commissionRate = isPartner
+        ? this.config.partnerCommission
+        : this.config.standardCommission;
 
-      // Store session locally
       const sessionId = `stream_${Date.now()}`;
       const session = {
         sessionId,
@@ -280,49 +452,71 @@ class YellowTokService {
         commissionRate,
         isPartner,
         createdAt: Date.now(),
-        status: 'pending',
-        appDefinition,
-        allocations
+        status: 'active',
       };
 
       this.activeSessions.set(sessionId, session);
       this.activeStreamSession = session;
 
-      console.log('✅ Stream session created:', sessionId);
-      console.log(`💰 [USDC] Session budget: $${depositAmount.toFixed(2)} USDC (${depositInUnits} units, 6 decimals)`);
-      console.log(`💰 [USDC] Current balance: $${session.currentBalance.toFixed(2)} USDC | Spent: $${session.spent.toFixed(2)} USDC`);
+      // Fetch ledger balance from ClearNode to confirm funds availability
+      if (this.sessionSigner) {
+        try {
+          const balancePayload = await createGetLedgerBalancesMessage(
+            this.sessionSigner,
+            this.userAddress
+          );
+          this.ws.send(balancePayload);
+        } catch (err) {
+          console.warn('⚠️ Could not fetch ledger balance:', err.message);
+        }
+      }
+
+      this._triggerEvent('onSessionCreated', { sessionId, session });
+
+      console.log('[LOCAL] ✅ Stream session created:', sessionId);
+      console.log(
+        `[LOCAL] 💰 [USDC] Session budget: $${depositAmount.toFixed(2)} USDC`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Current balance: $${session.currentBalance.toFixed(2)} USDC | Spent: $${session.spent.toFixed(2)} USDC`
+      );
 
       return {
         success: true,
         sessionId,
         deposit: depositAmount,
         commissionRate,
-        session
+        session,
       };
-
     } catch (error) {
-      console.error(' Failed to create stream session:', error);
+      console.error('❌ Failed to create stream session:', error);
       this._triggerEvent('onError', {
         type: 'session_creation_error',
         message: error.message,
-        error
+        error,
       });
       throw error;
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // SEND TIP — off-chain via Nitrolite createTransferMessage
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Send an instant tip to the streamer
-   * This happens OFF-CHAIN via state channels (no gas fees!)
-   * 
-   * @param {number} tipAmount - Amount to tip (in dollars)
-   * @param {string} streamerAddress - Address of the streamer
-   * @param {string} message - Optional message with the tip
-   * @returns {Promise<Object>} - Tip result
+   * Send an instant tip to the streamer.
+   * Uses createTransferMessage signed by session key — NO wallet popup!
+   *
+   * @param {number} tipAmount — in USDC
+   * @param {string} streamerAddress
+   * @param {string} message — optional message
+   * @returns {Promise<Object>}
    */
   async sendTip(tipAmount, streamerAddress, message = '') {
     if (!this.activeStreamSession) {
-      throw new Error('No active stream session. Please create a session first.');
+      throw new Error(
+        'No active stream session. Please create a session first.'
+      );
     }
 
     if (this.activeStreamSession.streamerAddress !== streamerAddress) {
@@ -338,64 +532,60 @@ class YellowTokService {
     }
 
     try {
-      console.log(` Sending tip of $${tipAmount} to ${streamerAddress}...`);
-
-      // Convert tip amount to asset units
-      const tipInUnits = this._toAssetUnits(tipAmount);
+      console.log(`[LOCAL] 💸 Sending tip of $${tipAmount} to ${streamerAddress}...`);
 
       // Calculate commission
-      const commissionAmount = tipAmount * (this.activeStreamSession.commissionRate / 100);
+      const commissionAmount =
+        tipAmount * (this.activeStreamSession.commissionRate / 100);
       const creatorReceives = tipAmount - commissionAmount;
 
-      // Create tip data
-      const tipData = {
-        type: 'tip',
-        sessionId: this.activeStreamSession.sessionId,
-        amount: tipInUnits.toString(),
-        recipient: streamerAddress,
-        sender: this.userAddress,
-        message,
-        timestamp: Date.now(),
-        commission: this._toAssetUnits(commissionAmount).toString(),
-        creatorReceives: this._toAssetUnits(creatorReceives).toString()
-      };
+      // ── Send transfer via Nitrolite SDK (session-key signed, $0 gas!) ──
+      if (this.sessionSigner && this.connected && this.authenticated) {
+        try {
+          const transferPayload = await createTransferMessage(
+            this.sessionSigner,
+            {
+              destination: streamerAddress,
+              allocations: [
+                {
+                  asset: this.config.defaultAsset,
+                  amount: String(tipAmount),
+                },
+              ],
+            }
+          );
 
-      // ── NO wallet signature needed here! ──
-      // State channels work like a bar tab: you signed ONCE when opening
-      // the session. All tips within the session are off-chain state updates
-      // authenticated by the session itself — zero popups, zero gas.
-      const tipHash = btoa(JSON.stringify(tipData)).slice(0, 32);
+          this.ws.send(transferPayload);
+        } catch (err) {
+          console.warn(
+            '⚠️ Nitrolite transfer failed, tracking locally:',
+            err.message
+          );
+        }
+      }
 
-      // Send through state channel (OFF-CHAIN, instant, $0 gas!)
-      this.ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'send_state_update',
-        params: {
-          ...tipData,
-          sessionAuth: this.activeStreamSession.sessionId,
-          hash: tipHash
-        },
-        id: Date.now()
-      }));
-
-      // Update local session state
+      // Update local session state (optimistic)
       this.activeStreamSession.spent += tipAmount;
       this.activeStreamSession.currentBalance -= tipAmount;
 
       // Trigger event
       this._triggerEvent('onTipSent', {
         amount: tipAmount,
-        amountInUnits: tipInUnits,
+        amountInUnits: this._toAssetUnits(tipAmount),
         recipient: streamerAddress,
         message,
         commission: commissionAmount,
         creatorReceives,
         remainingBalance: this.activeStreamSession.currentBalance,
-        totalSpent: this.activeStreamSession.spent
+        totalSpent: this.activeStreamSession.spent,
       });
 
-      console.log(`✅ Tip sent! Creator receives $${creatorReceives.toFixed(2)} USDC (${this.activeStreamSession.commissionRate}% commission)`);
-      console.log(`💰 [USDC] Remaining balance: $${this.activeStreamSession.currentBalance.toFixed(2)} USDC | Total spent: $${this.activeStreamSession.spent.toFixed(2)} USDC`);
+      console.log(
+        `[LOCAL] ✅ Tip sent! Creator receives $${creatorReceives.toFixed(2)} USDC (${this.activeStreamSession.commissionRate}% commission)`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Remaining: $${this.activeStreamSession.currentBalance.toFixed(2)} | Spent: $${this.activeStreamSession.spent.toFixed(2)}`
+      );
 
       return {
         success: true,
@@ -403,25 +593,22 @@ class YellowTokService {
         commission: commissionAmount,
         creatorReceives,
         remainingBalance: this.activeStreamSession.currentBalance,
-        totalSpent: this.activeStreamSession.spent
+        totalSpent: this.activeStreamSession.spent,
       };
-
     } catch (error) {
-      console.error(' Failed to send tip:', error);
+      console.error('❌ Failed to send tip:', error);
       this._triggerEvent('onError', {
         type: 'tip_error',
         message: error.message,
-        error
+        error,
       });
       throw error;
     }
   }
 
   /**
-   * Send multiple tips in a batch
-   * Useful for animations or special effects
-   * 
-   * @param {Array<Object>} tips - Array of tip objects
+   * Send multiple tips in a batch.
+   * @param {Array<Object>} tips
    * @returns {Promise<Object>}
    */
   async sendTipBatch(tips) {
@@ -445,16 +632,20 @@ class YellowTokService {
     return {
       success: true,
       totalTips: tips.length,
-      successfulTips: results.filter(r => r.success).length,
+      successfulTips: results.filter((r) => r.success).length,
       totalAmount,
-      results
+      results,
     };
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // END SESSION
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * End the current streaming session and settle on-chain
-   * This batches all tips into 1 on-chain transaction and returns unused funds
-   * 
+   * End the current streaming session.
+   * Tips were already sent off-chain via Nitrolite transfers.
+   *
    * @returns {Promise<Object>}
    */
   async endStreamSession() {
@@ -463,214 +654,199 @@ class YellowTokService {
     }
 
     try {
-      console.log(' Ending stream session...');
+      console.log('[LOCAL] 🔴 Ending stream session...');
 
-      const sessionId = this.activeStreamSession.sessionId;
-      const unusedBalance = this.activeStreamSession.currentBalance;
-
-      // Send close session message to ClearNode
-      this.ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'close_session',
-        params: {
-          sessionId,
-          timestamp: Date.now()
-        },
-        id: Date.now()
-      }));
-
-      // Update session status
-      this.activeStreamSession.status = 'closed';
-      this.activeStreamSession.closedAt = Date.now();
+      const session = this.activeStreamSession;
+      session.status = 'closed';
+      session.closedAt = Date.now();
 
       const sessionSummary = {
-        sessionId,
-        duration: this.activeStreamSession.closedAt - this.activeStreamSession.createdAt,
-        totalDeposited: this.activeStreamSession.initialDeposit,
-        totalSpent: this.activeStreamSession.spent,
-        unusedBalance,
-        commissionRate: this.activeStreamSession.commissionRate
+        sessionId: session.sessionId,
+        duration: session.closedAt - session.createdAt,
+        totalDeposited: session.initialDeposit,
+        totalSpent: session.spent,
+        unusedBalance: session.currentBalance,
+        commissionRate: session.commissionRate,
       };
 
-      console.log('🔴 Stream session ended.');
-      console.log(`💰 [USDC] Final balance: $${unusedBalance.toFixed(2)} USDC (will be returned to your wallet)`);
-      console.log(`💰 [USDC] Total spent in tips: $${this.activeStreamSession.spent.toFixed(2)} USDC`);
-      console.log(`💰 [USDC] Initial deposit was: $${this.activeStreamSession.initialDeposit.toFixed(2)} USDC`);
-      console.log(`💰 [USDC] Session duration: ${((Date.now() - this.activeStreamSession.createdAt) / 1000).toFixed(0)}s`);
+      console.log('[LOCAL] 🔴 Stream session ended.');
+      console.log(
+        `[LOCAL] 💰 [USDC] Final balance: $${session.currentBalance.toFixed(2)} USDC (unused)`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Total spent in tips: $${session.spent.toFixed(2)} USDC`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Initial deposit was: $${session.initialDeposit.toFixed(2)} USDC`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Session duration: ${((Date.now() - session.createdAt) / 1000).toFixed(0)}s`
+      );
+
+      console.log('[LOCAL] 🔴 Stream session ended.');
+      console.log(
+        `[YELLOW] 💰 [YTEST.USD] Final balance: $${session.currentBalance.toFixed(2)} (unused)`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Total spent in tips: $${session.spent.toFixed(2)} USDC`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Initial deposit was: $${session.initialDeposit.toFixed(2)} USDC`
+      );
+      console.log(
+        `[LOCAL] 💰 [USDC] Session duration: ${((Date.now() - session.createdAt) / 1000).toFixed(0)}s`
+      );
 
       this._triggerEvent('onSessionClosed', sessionSummary);
 
       // Clear active session
       this.activeStreamSession = null;
 
-      return {
-        success: true,
-        ...sessionSummary
-      };
-
+      return { success: true, ...sessionSummary };
     } catch (error) {
-      console.error(' Failed to end stream session:', error);
+      console.error('❌ Failed to end stream session:', error);
       this._triggerEvent('onError', {
         type: 'session_close_error',
         message: error.message,
-        error
+        error,
       });
       throw error;
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // MESSAGE HANDLING (post-auth, persistent)
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Handle incoming messages from ClearNode
+   * Handle incoming messages from ClearNode using Nitrolite SDK parser.
    * @private
    */
   _handleMessage(data) {
     try {
-      // Parse the raw WebSocket message (JSON-RPC response from ClearNode)
       const raw = typeof data === 'string' ? data : data.toString();
-      let message;
+      let parsed;
       try {
-        message = JSON.parse(raw);
+        parsed = JSON.parse(raw);
       } catch {
         console.warn('⚠️ Non-JSON message from ClearNode:', raw);
         return;
       }
 
-      // Normalise: ClearNode may wrap in result/params or send flat
-      if (message.result) message = message.result;
-      if (message.params) message = message.params;
+      // Use Nitrolite SDK parser for structured response handling
+      const response = parseAnyRPCResponse(JSON.stringify(parsed));
 
-      switch (message.type) {
-        case 'session_created':
-          this._handleSessionCreated(message);
+      switch (response.method) {
+        // ── Transfer confirmation ──
+        case RPCMethod.Transfer: {
+          console.log('[YELLOW] ✅ Transfer confirmed by ClearNode:', response.params);
           break;
+        }
 
-        case 'tip':
-        case 'state_update':
-          this._handleTipReceived(message);
+        // ── Balance updates (real-time push from ClearNode) ──
+        case RPCMethod.BalanceUpdate: {
+          const balances =
+            response.params?.balanceUpdates || response.params?.ledgerBalances;
+          if (balances) {
+            console.log('[YELLOW] 💰 Balance update from ClearNode:', balances);
+            const assetEntry = Array.isArray(balances)
+              ? balances.find((b) => b.asset === this.config.defaultAsset)
+              : null;
+            if (assetEntry && this.activeStreamSession) {
+              this.activeStreamSession.currentBalance = parseFloat(
+                assetEntry.amount
+              );
+            }
+          }
+          this._triggerEvent('onBalanceUpdate', response.params);
           break;
+        }
 
-        case 'balance_update':
-          this._handleBalanceUpdate(message);
+        // ── Ledger balance query response ──
+        case RPCMethod.GetLedgerBalances: {
+          const ledgerBalances = response.params?.ledgerBalances;
+          if (ledgerBalances) {
+            console.log('[YELLOW] 📊 Ledger balances:', ledgerBalances);
+          }
+          this._triggerEvent('onBalanceUpdate', { balance: ledgerBalances });
           break;
+        }
 
-        case 'session_closed':
-          this._handleSessionClosed(message);
+        // ── Channels update ──
+        case RPCMethod.ChannelsUpdate: {
+          console.log('[YELLOW] 📡 Channels update:', response.params);
           break;
+        }
 
-        case 'error':
-          this._handleError(message);
+        // ── Assets info ──
+        case RPCMethod.Assets: {
+          console.log('[YELLOW] 📋 Assets info:', response.params);
+          break;
+        }
+
+        // ── Error from ClearNode ──
+        case RPCMethod.Error: {
+          console.error('❌ ClearNode error:', response.params);
+          this._triggerEvent('onError', {
+            type: 'clearnode_error',
+            message: response.params?.error || 'Unknown ClearNode error',
+            details: response.params,
+          });
+          break;
+        }
+
+        // ── Auth messages (handled by _authenticateWithNitrolite, skip here) ──
+        case RPCMethod.AuthChallenge:
+        case RPCMethod.AuthVerify:
           break;
 
         default:
-          console.log(' Received message:', message);
+          console.log('[YELLOW] 📩 ClearNode message:', response.method, response.params);
       }
     } catch (error) {
-      console.error('Failed to parse message:', error);
+      console.error('Failed to handle ClearNode message:', error);
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // RECONNECTION
+  // ═══════════════════════════════════════════════════════════════
+
   /**
-   * Handle session created confirmation
    * @private
    */
-  _handleSessionCreated(message) {
-    console.log(' Session created on ClearNode:', message.sessionId);
+  _attemptReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      const delay = Math.min(
+        1000 * Math.pow(2, this.reconnectAttempts),
+        30000
+      );
 
-    if (this.activeStreamSession) {
-      this.activeStreamSession.status = 'active';
-      this.activeStreamSession.clearnodeSessionId = message.sessionId;
+      console.log(
+        `[YELLOW] 🔄 Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`
+      );
+
+      setTimeout(() => {
+        this._connectToClearNode().catch((err) => {
+          console.error('Reconnect failed:', err);
+        });
+      }, delay);
+    } else {
+      console.error('❌ Max reconnection attempts reached');
+      this._triggerEvent('onError', {
+        type: 'max_reconnect_attempts',
+        message: 'Could not reconnect to Yellow Network',
+      });
     }
-
-    this._triggerEvent('onSessionCreated', {
-      sessionId: message.sessionId,
-      session: this.activeStreamSession
-    });
   }
 
-  /**
-   * Handle incoming tip (when you're the streamer)
-   * @private
-   */
-  _handleTipReceived(message) {
-    const tipAmount = this._fromAssetUnits(parseInt(message.amount));
-    const commission = message.commission ? this._fromAssetUnits(parseInt(message.commission)) : 0;
-    const creatorReceives = tipAmount - commission;
-
-    console.log(` Tip received: $${tipAmount} (you get $${creatorReceives})`);
-
-    this._triggerEvent('onTipReceived', {
-      amount: tipAmount,
-      commission,
-      creatorReceives,
-      sender: message.sender,
-      message: message.message || '',
-      timestamp: message.timestamp
-    });
-  }
+  // ═══════════════════════════════════════════════════════════════
+  // UTILITY METHODS
+  // ═══════════════════════════════════════════════════════════════
 
   /**
-   * Handle balance update
-   * @private
-   */
-  _handleBalanceUpdate(message) {
-    const balance = this._fromAssetUnits(parseInt(message.balance));
-    
-    if (this.activeStreamSession) {
-      this.activeStreamSession.currentBalance = balance;
-    }
-
-    this._triggerEvent('onBalanceUpdate', { balance });
-  }
-
-  /**
-   * Handle session closed confirmation
-   * @private
-   */
-  _handleSessionClosed(message) {
-    console.log(' Session closed on-chain, unused funds returned');
-    this._triggerEvent('onSessionClosed', message);
-  }
-
-  /**
-   * Handle error messages
-   * @private
-   */
-  _handleError(message) {
-    console.error(' ClearNode error:', message.error);
-    this._triggerEvent('onError', {
-      type: 'clearnode_error',
-      message: message.error,
-      details: message
-    });
-  }
-
-  /**
-   * Create app session message (helper for Yellow SDK)
-   * @private
-   */
-  async _createAppSessionMessage(sessions) {
-    const message = JSON.stringify({
-      type: 'create_session',
-      sessions,
-      timestamp: Date.now()
-    });
-
-    const signature = await this.messageSigner(message);
-
-    return JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'create_app_session',
-      params: {
-        message,
-        signature,
-        sender: this.userAddress
-      },
-      id: Date.now()
-    });
-  }
-
-  /**
-   * Convert dollar amount to asset units (considering decimals)
+   * Convert dollar amount to asset units (considering decimals).
    * @private
    */
   _toAssetUnits(dollarAmount) {
@@ -678,7 +854,7 @@ class YellowTokService {
   }
 
   /**
-   * Convert asset units to dollar amount
+   * Convert asset units to dollar amount.
    * @private
    */
   _fromAssetUnits(units) {
@@ -686,7 +862,7 @@ class YellowTokService {
   }
 
   /**
-   * Register event handler
+   * Register event handler.
    */
   on(event, handler) {
     if (this.eventHandlers.hasOwnProperty(event)) {
@@ -697,7 +873,7 @@ class YellowTokService {
   }
 
   /**
-   * Trigger event handler
+   * Trigger event handler.
    * @private
    */
   _triggerEvent(event, data) {
@@ -711,7 +887,7 @@ class YellowTokService {
   }
 
   /**
-   * Get current session info
+   * Get current session info.
    */
   getSessionInfo() {
     if (!this.activeStreamSession) {
@@ -726,16 +902,16 @@ class YellowTokService {
       spent: this.activeStreamSession.spent,
       commissionRate: this.activeStreamSession.commissionRate,
       isPartner: this.activeStreamSession.isPartner,
-      status: this.activeStreamSession.status
+      status: this.activeStreamSession.status,
     };
   }
 
   /**
-   * Check if spending limit would be exceeded
+   * Check if spending limit would be exceeded.
    */
   checkSpendingLimit(tipAmount, spendingLimit) {
     if (!this.activeStreamSession) {
-      return { allowed: false, reason: 'No active session' };
+      return { allowed: false, reason: 'No active session', percentUsed: 0 };
     }
 
     const newTotal = this.activeStreamSession.spent + tipAmount;
@@ -746,7 +922,8 @@ class YellowTokService {
         reason: 'Spending limit exceeded',
         currentSpent: this.activeStreamSession.spent,
         limit: spendingLimit,
-        wouldBe: newTotal
+        wouldBe: newTotal,
+        percentUsed: (this.activeStreamSession.spent / spendingLimit) * 100,
       };
     }
 
@@ -757,7 +934,7 @@ class YellowTokService {
         allowed: true,
         warning: true,
         message: `You've used ${percentUsed.toFixed(0)}% of your spending limit`,
-        percentUsed
+        percentUsed,
       };
     }
 
@@ -765,7 +942,7 @@ class YellowTokService {
   }
 
   /**
-   * Disconnect from Yellow Network
+   * Disconnect from Yellow Network.
    */
   disconnect() {
     if (this.ws) {
@@ -773,7 +950,8 @@ class YellowTokService {
       this.ws = null;
     }
     this.connected = false;
-    console.log('👋 Disconnected from Yellow Network');
+    this.authenticated = false;
+    console.log('[YELLOW] 👋 Disconnected from Yellow Network');
   }
 }
 

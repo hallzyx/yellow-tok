@@ -15,9 +15,9 @@ export interface YellowTokConfig {
     standardCommission?: number;
     /** Commission rate for partner streamers (default: 3) */
     partnerCommission?: number;
-    /** Default asset to use (default: 'usdc') */
+    /** Default asset to use (default: 'ytest.usd') */
     defaultAsset?: string;
-    /** Asset decimal places (default: 6 for USDC) */
+    /** Asset decimal places (default: 6) */
     assetDecimals?: number;
   }
   
@@ -83,7 +83,7 @@ export interface YellowTokConfig {
   export interface Allocation {
     /** Participant address */
     participant: string;
-    /** Asset identifier (e.g., 'usdc') */
+    /** Asset identifier (e.g., 'ytest.usd') */
     asset: string;
     /** Amount in asset units (considering decimals) */
     amount: string;
@@ -411,9 +411,12 @@ export interface YellowTokConfig {
     
     /** Whether the WebSocket is currently connected to ClearNode */
     connected: boolean;
+
+    /** Whether authenticated with ClearNode via Nitrolite */
+    authenticated: boolean;
     
     // Connection methods
-    initialize(walletProvider: WalletProvider): Promise<InitializeResult>;
+    initialize(walletProvider: WalletProvider, walletClient: any): Promise<InitializeResult>;
     disconnect(): void;
     
     // Session methods

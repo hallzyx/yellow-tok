@@ -14,7 +14,7 @@ import React, {
   useCallback,
   useEffect,
 } from 'react'
-import { useAccount } from 'wagmi'
+import { useAccount, useWalletClient } from 'wagmi'
 import YellowTokService from '../services/YellowTokService'
 import type {
   SessionInfo,
@@ -104,6 +104,7 @@ const YellowContext = createContext<UseYellowReturn | null>(null)
 // ─── Provider ─────────────────────────────────────────────────────
 export function YellowProvider({ children }: { children: React.ReactNode }) {
   const { isConnected: isWalletConnected } = useAccount()
+  const { data: walletClient } = useWalletClient()
 
   // ── On-chain USDC data ──────────────────────────────────────────
   const usdc = useUSDC()
@@ -126,7 +127,7 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
         clearnodeUrl: 'wss://clearnet-sandbox.yellow.com/ws',
         standardCommission: 10,
         partnerCommission: 3,
-        defaultAsset: 'usdc',
+        defaultAsset: 'ytest.usd',
         assetDecimals: 6,
       })
     }
@@ -137,8 +138,8 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
   const initialize = useCallback(async (): Promise<boolean> => {
     if (isInitialized) return true
     if (isInitializing) return false
-    if (!isWalletConnected || !window.ethereum) {
-      setError('Wallet not connected. Please connect your wallet first.')
+    if (!isWalletConnected || !window.ethereum || !walletClient) {
+      setError('Wallet not connected or wallet client not ready.')
       return false
     }
 
@@ -158,7 +159,8 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
       service.on('onSessionClosed', () => setSession(null))
       service.on('onError', (evt: { message: string }) => setError(evt.message))
 
-      const result = await service.initialize(window.ethereum)
+      // Pass walletClient for EIP-712 signing during Nitrolite auth
+      const result = await service.initialize(window.ethereum, walletClient)
 
       if (result.success) {
         setIsInitialized(true)
@@ -173,7 +175,7 @@ export function YellowProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsInitializing(false)
     }
-  }, [isInitialized, isInitializing, isWalletConnected, getService])
+  }, [isInitialized, isInitializing, isWalletConnected, walletClient, getService])
 
   // ── Create a streaming session (state channel) ──────────────────
   const createSession = useCallback(
