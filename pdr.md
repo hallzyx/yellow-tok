@@ -12,7 +12,7 @@
 4. [MVP Features](#4-mvp-features)
 5. [Technology Stack](#5-technology-stack)
 6. [User Flows](#6-user-flows)
-7. [Economic Model](#7-economic-model)
+7. [Business Model](#7-business-model)
 8. [Integrations](#8-integrations)
 9. [Timeline](#9-timeline)
 
@@ -253,14 +253,29 @@ Demonstrate that Yellow Network enables a streaming tipping experience **compara
 
 ---
 
-## 7. Economic Model
+## 7. Business Model
 
-### 7.1 Commissions
+### 7.1 Commission Structure
 
-| Tier | Rate | Streamer Receives | Platform |
-|------|-----:|:---------------:|:----------:|
-| Standard | 10% | 90% | 10% |
-| Partner | 3% | 97% | 3% |
+#### Standard Rate: 10% commission
+
+**Example: Viewer sends $1.00 tip**
+- Creator receives: $0.90
+- Platform fee: $0.10
+
+**vs TikTok:** Creator gets only $0.50 (50% commission) 🎯
+
+#### Exclusive Partner Program: 3% commission 💥
+
+**Stream exclusively on YellowTok**
+- Creator receives: $0.97 per dollar
+- Platform fee: $0.03
+- **Maximize your earnings!**
+
+| Tier | Rate | Creator Receives | Platform Fee | vs TikTok (50%) |
+|------|-----:|:----------------:|:------------:|:---------------:|
+| **Standard** | 10% | $0.90 | $0.10 | +80% more 📈 |
+| **Partner** 💎 | 3% | $0.97 | $0.03 | +94% more 🚀 |
 
 ### 7.2 Session Example
 
